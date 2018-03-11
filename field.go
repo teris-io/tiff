@@ -12,6 +12,8 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"math"
+	"math/big"
 	"reflect"
 	"sync"
 )
@@ -69,6 +71,7 @@ type Field interface {
 	Count() uint64
 	Offset() uint64
 	Value() FieldValue // TODO: Change to BReader??
+	ParsedValue() interface{}
 }
 
 type field struct {
@@ -118,6 +121,95 @@ func (f *field) Offset() uint64 {
 
 func (f *field) Value() FieldValue {
 	return f.value
+}
+
+func (f *field) ParsedValue() interface{} {
+	tp := f.Type()
+	buf := f.value.Bytes()
+	bo := f.value.Order()
+	count := f.Count()
+
+	if count == 0 {
+		switch tp.ID() {
+		case FTAscii.ID():
+			return ""
+		case FTByte.ID():
+			return byte(0)
+		case FTSByte.ID():
+			return int8(0)
+		case FTShort.ID():
+			return uint16(0)
+		case FTSShort.ID():
+			return int16(0)
+		case FTIFD.ID():
+			return uint32(0)
+		case FTLong.ID():
+			return uint32(0)
+		case FTFloat.ID():
+			return float32(0.0)
+		case FTDouble.ID():
+			return float64(0.0)
+		default:
+			return nil
+		}
+	}
+
+	if tp.ID() == FTAscii.ID() {
+		if repr := tp.Repr(); repr != nil {
+			return repr(buf, f.Value().Order())
+		}
+		return fmt.Sprintf("%v", buf)
+	}
+
+	size := tp.Size()
+	var vals []interface{}
+	for len(buf) > 0 {
+		in := buf[:size]
+		buf = buf[size:]
+
+		var v interface{}
+		switch tp.ID() {
+		case FTByte.ID():
+			v = in[0]
+		case FTSByte.ID():
+			v = int8(in[0])
+		case FTShort.ID():
+			v = bo.Uint16(in)
+		case FTSShort.ID():
+			v = int16(bo.Uint16(in))
+		case FTIFD.ID():
+			fallthrough
+		case FTLong.ID():
+			v = bo.Uint32(in)
+		case FTRational.ID():
+			denom := int64(bo.Uint32(in[4:]))
+			if denom != 0 {
+				v = big.NewRat(int64(bo.Uint32(in)), denom)
+			} else {
+				// Prevent panics due to poorly written Rational fields with a denominator of 0.
+				v = big.Rat{}
+			}
+		case FTSRational.ID():
+			denom := int64(int32(bo.Uint32(in[4:])))
+			if denom != 0 {
+				v = big.NewRat(int64(int32(bo.Uint32(in))), denom)
+			} else {
+				// Prevent panics due to poorly written Rational fields with a denominator of 0.
+				v = big.Rat{}
+			}
+		case FTFloat.ID():
+			v = math.Float32frombits(bo.Uint32(in))
+		case FTDouble.ID():
+			v = math.Float64frombits(bo.Uint64(in))
+		default:
+			v = []byte(in)
+		}
+		vals = append(vals, v)
+	}
+	if count == 1 {
+		return vals[0]
+	}
+	return vals
 }
 
 func (f *field) String() string {
